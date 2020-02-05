@@ -1,0 +1,66 @@
+#!/bin/bash
+acquire_lock() {
+    session_id=${1}
+    echo "Trying to acquire the lock..."
+    result=$(curl -s -XPUT "${consul_address}/v1/kv/locks/${task_name}/.lock?acquire=${session_id}")
+    [ "${result}" == "true" ] && echo "Lock acquired"
+}
+release_lock() {
+    session_id=${1}
+    echo "Releasing the lock..."
+    result=$(curl -s -XPUT "${consul_address}/v1/kv/locks/${task_name}/.lock?release=${session_id}")
+    [ "${result}" == "true" ] && echo "Lock released"
+}
+destroy_session () {
+    session_id=${1}
+    echo "Destroying the session..."
+    result=$(curl -s -XPUT "${consul_address}/v1/session/destroy/${session_id}")
+    [ "${result}" == "true" ] && echo "Session destroyed"
+}
+remove_out_of_service_file() {
+   if [ -f ${out_of_service_file} ];then
+          rm -f ${out_of_service_file}
+   fi
+}
+service_already_registered() {
+    num_host_registered=$(dig ${fq_service_name} +short | wc -l)
+    if [ ${num_host_registered} -eq 0 ];then
+      false && echo "No host registered for the service"
+    elif [ ${num_host_registered} -eq 1 ];then
+      registered_master_ip=$(dig ${fq_service_name} +short)
+      if [ ${registered_master_ip} == ${host_ip} ];then
+        true && echo "Local host already registered"
+      else
+        true && echo "Node ${registered_master_ip} already registered for the service."
+      fi
+    else
+      echo "More than one host registered with the service"
+      exit 1
+    fi
+}
+register_service() {
+      consul services register -name=${service_name} -address=${host_ip} -port=3306
+}
+##############
+consul_address='http://consul.service.consul:8500'
+out_of_service_file='/etc/out-of-service'
+cluster_name='<%= scope['::cluster'] %>'
+service_name=${cluster_name}
+fq_service_name=${service_name}.service.consul
+host_ip=$(hostname -i)
+srv=$(hostname)
+task_name=cluster_name
+if ! service_already_registered;then
+   session_id=$(curl -s -XPUT "${consul_address}/v1/session/create" -d "{\"Name\": \"${task_name}\"}"  | jq -r '.ID')
+   echo "Session_id: ${session_id}"
+   if ! acquire_lock "${session_id}"; then
+      echo "Unable to acquire the lock."
+      echo "Other master is probably trying to register, won't register this host."
+      destroy_session "${session_id}"
+      exit 0
+   fi
+   remove_out_of_service_file
+   register_service
+   release_lock "${session_id}"
+   destroy_session "${session_id}"
+fi
